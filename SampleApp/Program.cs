@@ -10,7 +10,7 @@ namespace SampleApp
         // Initialization code. Don't use any Avalonia, third-party APIs or any
         // SynchronizationContext-reliant code before AppMain (builder.Build) is called: things aren't initialized
         // yet and stuff might break.
-        public static async Task Main(string[] args)
+        public static void Main(string[] args)
         {
             var builder = App.CreateBuilder();
 
@@ -18,7 +18,7 @@ namespace SampleApp
 
             var app = builder.Build();
 
-            await app.RunAsync();
+            app.Run();
         }
 
         // Avalonia configuration, don't remove; also used by visual designer.

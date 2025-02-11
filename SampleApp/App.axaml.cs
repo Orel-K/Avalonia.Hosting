@@ -12,10 +12,6 @@ namespace SampleApp;
 
 public partial class App : HostedApplication<App>
 {
-    public App()
-    {
-        Debugger.Break();
-    }
     public override void Initialize()
     {
         AvaloniaXamlLoader.Load(this);
@@ -47,8 +43,6 @@ public partial class App : HostedApplication<App>
         var logger = Services.GetRequiredService<ILogger<App>>();
 
         logger.LogInformation("StopAsync, press any key to stop the application");
-
-        Console.ReadKey();
 
         return Task.CompletedTask;
     }

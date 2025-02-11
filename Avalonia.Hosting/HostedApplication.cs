@@ -1,4 +1,5 @@
 ﻿using System.Diagnostics;
+using System.Globalization;
 using Avalonia.Controls.ApplicationLifetimes;
 using Avalonia.Threading;
 using Microsoft.Extensions.Configuration;
@@ -8,31 +9,45 @@ using Microsoft.Extensions.Logging;
 
 namespace Avalonia.Hosting;
 
-public abstract class HostedApplication<T> : Application, IHostedService, IDisposable where T : HostedApplication<T>, new()
+public abstract class HostedApplication : Application
+{
+    public new static HostedApplication Current => (HostedApplication)Application.Current!;
+    // App Services cannot be called before `Build` was called
+    public IServiceProvider Services { get; protected set; } = null!;
+}
+
+public abstract class HostedApplication<T> : HostedApplication, IHostedService
+    where T : HostedApplication<T>, new()
 {
     public sealed class AvaloniaApplicationBuilder<TH> where TH : HostedApplication<TH>, new()
     {
-        readonly HostApplicationBuilder _hostBuilder;
         public IServiceCollection Services => _hostBuilder.Services;
         public ILoggingBuilder Logging => _hostBuilder.Logging;
-        public IConfigurationBuilder Configuration => _hostBuilder.Configuration;
+        public IConfigurationManager Configuration => _hostBuilder.Configuration;
 
         readonly AppBuilder _appBuilder;
+        readonly HostApplicationBuilder _hostBuilder;
+        readonly Action<IClassicDesktopStyleApplicationLifetime> _lifeTimeConfigure;
+        readonly string[] _args;
 
-        public AvaloniaApplicationBuilder()
+        public AvaloniaApplicationBuilder(string[] args,
+            Action<IClassicDesktopStyleApplicationLifetime> lifeTimeConfigure)
         {
+            _args = args;
+            _lifeTimeConfigure = lifeTimeConfigure;
             _hostBuilder = Host.CreateApplicationBuilder();
 
-
             _appBuilder = AppBuilder.Configure<TH>()
-              .UsePlatformDetect()
-              .WithInterFont()
-              .LogToTrace();
+                .UsePlatformDetect();
         }
 
-        public TH Build()
+        public TH Build(ServiceProviderOptions? serviceProviderOptions = null)
         {
-            _appBuilder.SetupWithClassicDesktopLifetime([], x => x.ShutdownMode = Controls.ShutdownMode.OnMainWindowClose);
+            serviceProviderOptions ??= new ServiceProviderOptions();
+
+            _appBuilder.SetupWithClassicDesktopLifetime(_args, _lifeTimeConfigure);
+
+            _hostBuilder.ConfigureContainer(new DefaultServiceProviderFactory(serviceProviderOptions));
 
             _hostBuilder.Services.AddHostedService<TH>(x => (TH)Application.Current!);
 
@@ -45,53 +60,34 @@ public abstract class HostedApplication<T> : Application, IHostedService, IDispo
             return app;
         }
     }
-    public IServiceProvider Services { get; private set; } = default!;
 
-    public static AvaloniaApplicationBuilder<T> CreateBuilder()
+    public new static T Current => (T)HostedApplication.Current;
+
+    public static AvaloniaApplicationBuilder<T> CreateBuilder(string[]? args = null,
+        Action<IClassicDesktopStyleApplicationLifetime>? lifeTimeConfigure = null)
     {
-        Thread.CurrentThread.TrySetApartmentState(ApartmentState.Unknown);
-        Thread.CurrentThread.TrySetApartmentState(ApartmentState.STA);
 
-        var builder = new AvaloniaApplicationBuilder<T>();
+        args ??= Environment.GetCommandLineArgs().Skip(1).ToArray();
+
+        lifeTimeConfigure ??= (x) => { };
+
+        var builder = new AvaloniaApplicationBuilder<T>(args, lifeTimeConfigure);
 
         builder.Services.AddSingleton<T>(x => (T)Application.Current!);
 
         return builder;
     }
 
-    public async Task RunAsync()
+    async Task HostMain()
     {
-        Dispatcher.UIThread.VerifyAccess();
-
-        var lifeTime = (ClassicDesktopStyleApplicationLifetime)this.ApplicationLifetime!;
-
         var hostLifeTime = Services.GetRequiredService<IHostApplicationLifetime>();
 
         var host = Services.GetRequiredService<IHost>();
 
-        lifeTime.Startup += async delegate
-        {
-            // cpu bounded, startup will be called from the dispatcher
-            await Task.Run(async () =>
-            {
-                await host.StartAsync(hostLifeTime.ApplicationStopping).ConfigureAwait(ConfigureAwaitOptions.SuppressThrowing);
-            });
-        };
-
-        using var _ = hostLifeTime.ApplicationStopping.Register(() =>
-        {
-            Dispatcher.UIThread.Invoke(delegate { lifeTime.Shutdown(); });
-        });
-
-        lifeTime.ShutdownRequested += async delegate
-        {
-            await host.StopAsync(CancellationToken.None).ConfigureAwait(ConfigureAwaitOptions.SuppressThrowing);
-        };
-
-        Environment.ExitCode = lifeTime.Start();
-
         try
         {
+            await host.StartAsync(hostLifeTime.ApplicationStopping);
+
             await host.WaitForShutdownAsync(hostLifeTime.ApplicationStopping).ConfigureAwait(false);
         }
         finally
@@ -107,14 +103,40 @@ public abstract class HostedApplication<T> : Application, IHostedService, IDispo
         }
     }
 
-    public virtual Task StartAsync(CancellationToken cancellationToken)
+    public int Run()
     {
-        Debugger.Break();
-        return Task.CompletedTask;
+        Dispatcher.UIThread.VerifyAccess();
+
+        var logger = Services.GetRequiredService<ILogger<HostedApplication<T>>>();
+
+        var appLifeTime = (ClassicDesktopStyleApplicationLifetime)this.ApplicationLifetime!;
+
+        var hostLifeTime = Services.GetRequiredService<IHostApplicationLifetime>();
+
+        uint sessionId = (uint)Process.GetCurrentProcess().SessionId;
+
+        var host = Services.GetRequiredService<IHost>();
+
+        appLifeTime.Startup += async delegate
+        {
+            await HostMain().ConfigureAwait(false);
+
+            // `Shutdown` and not `TryShutdown`, not cancelable
+            Dispatcher.UIThread.Invoke(delegate { appLifeTime.Shutdown(); });
+        };
+
+        appLifeTime.ShutdownRequested += (a, b) =>
+        {
+            b.Cancel = true;
+            hostLifeTime.StopApplication();
+        };
+
+        return Environment.ExitCode = appLifeTime.Start();
     }
 
-    public virtual void Dispose()
+    public virtual Task StartAsync(CancellationToken cancellationToken)
     {
+        return Task.CompletedTask;
     }
 
     public virtual Task StopAsync(CancellationToken cancellationToken)
@@ -122,5 +144,3 @@ public abstract class HostedApplication<T> : Application, IHostedService, IDispo
         return Task.CompletedTask;
     }
 }
-
-
